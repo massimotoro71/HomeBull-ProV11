@@ -2249,7 +2249,7 @@
         ];
 
         // --- STATO APPLICAZIONE ---
-        let HB_SESSION_KEY = null; // chiave AES derivata dal PIN, mai persistita
+        let HB_SESSION_KEY = null; // non usato (cifratura locale rimossa)
 
         let state = {
             categories: [], // caricato e decifrato dopo verifica PIN
@@ -2608,13 +2608,8 @@
                 });
 
                 if (assertion) {
-                    // Biometric verified — inizializza crypto con PIN da settings (non segreto qui)
-                    // e carica i dati cifrati dal localStorage
-                    const pin = state.settings.pin;
-                    if (pin) {
-                        await hbInitSessionKey(pin);
-                        await hbLoadEncryptedState();
-                    }
+                    // Biometric verified — carica dati dal localStorage
+                    await hbLoadEncryptedState();
                     unlockVault();
                 }
             } catch (err) {
@@ -2707,7 +2702,8 @@
 
         function saveState() {
             localStorage.setItem('hb_core_set', JSON.stringify(state.settings));
-            _hbSaveEncrypted(); // fire-and-forget: cifra categories + items
+            localStorage.setItem('hb_core_cats',  JSON.stringify(state.categories));
+            localStorage.setItem('hb_core_items', JSON.stringify(state.items));
             localStorage.setItem('hb_last_save_ts', Date.now());
             // Auto-upload: se sync manuale o real-time è attiva
             if (typeof fbDb !== 'undefined' && fbDb) {
@@ -3599,7 +3595,7 @@
             clearTimeout(autoLockTimer);
         }
 
-        function logout() { hbCryptoLock(); disableAutoLockListeners(); location.reload(); }
+        function logout() { disableAutoLockListeners(); location.reload(); }
         function renderHealthDesktop() {
             const el = document.getElementById('health-desktop');
             if (!el) return;
@@ -3882,21 +3878,15 @@
                 notes: notes
             };
             const json = JSON.stringify(payload, null, 2);
-            // Cifra il backup con la stessa chiave di sessione
-            let content = json;
-            let filename = `homebull-backup-${new Date().toISOString().slice(0,10)}.json`;
-            if (HB_SESSION_KEY) {
-                const encJson = await _hbEncryptLocal(json);
-                const saltHex = localStorage.getItem('hb_ls_salt') || '';
-                content = JSON.stringify({ hb_backup: true, v: '11', enc: encJson, salt: saltHex });
-                filename = `homebull-backup-${new Date().toISOString().slice(0,10)}.hbb`;
-            }
+            // Backup in chiaro — nessuna cifratura locale
+            const content = json;
+            const filename = `homebull-backup-${new Date().toISOString().slice(0,10)}.json`;
             const blob = new Blob([content], { type: 'application/json' });
             const a = document.createElement('a');
             a.href = URL.createObjectURL(blob);
             a.download = filename;
             a.click();
-            showToast('🔒 Backup cifrato esportato (.hbb)');
+            showToast('📦 Backup esportato (.json)');
         }
 
         function exportCSV() {
@@ -3928,30 +3918,10 @@
                 try {
                     const raw = JSON.parse(e.target.result);
                     let data = raw;
-                    // Backup cifrato (.hbb)
+                    // Retrocompatibilità: se il file era cifrato (.hbb) avvisa l'utente
                     if (raw.hb_backup && raw.enc) {
-                        if (!HB_SESSION_KEY) {
-                            showToast('⚠️ Sblocca il vault prima di importare un backup cifrato', false);
-                            return;
-                        }
-                        // Se il backup ha il suo salt (dispositivo diverso), ri-deriva la chiave
-                        let decryptKey = HB_SESSION_KEY;
-                        if (raw.salt && raw.salt !== (localStorage.getItem('hb_ls_salt') || '')) {
-                            const backupSalt = new Uint8Array(
-                                raw.salt.match(/.{2}/g).map(b => parseInt(b, 16))
-                            );
-                            decryptKey = await deriveKey(state.settings.pin, backupSalt);
-                        }
-                        const HB_ENC_PFX = 'hb_enc_v11:';
-                        const combined = new Uint8Array(
-                            atob(raw.enc.slice(HB_ENC_PFX.length)).split('').map(c => c.charCodeAt(0))
-                        );
-                        const decBuf = await crypto.subtle.decrypt(
-                            { name: 'AES-GCM', iv: combined.slice(0, 12) },
-                            decryptKey,
-                            combined.slice(12)
-                        );
-                        data = JSON.parse(new TextDecoder().decode(decBuf));
+                        showToast('⚠️ File .hbb cifrato non supportato. Esporta un nuovo backup JSON.', false);
+                        return;
                     }
                     if (!data.categories || !data.items) throw new Error('Formato non valido');
                     const msg = `Importare ${data.items.length} password e ${data.categories.length} categorie?\n\nI dati attuali verranno sostituiti.`;
@@ -4386,100 +4356,41 @@
         }
 
         // ═══════════════════════════════════════════════════════════════
-        //  HB LOCAL CRYPTO — AES-256-GCM + PBKDF2 (riusa deriveKey Firebase)
-        //  localStorage cifrato  ·  backup cifrato  ·  mai la chiave su disco
-        // ═══════════════════════════════════════════════════════════════
-        const HB_ENC_PREFIX = 'hb_enc_v11:';
+        // ─── HB LOCAL CRYPTO — RIMOSSO (dati in chiaro nel localStorage) ────
+        const HB_ENC_PREFIX = 'hb_enc_v11:'; // tenuto per retrocompatibilità lettura
 
-        // Deriva chiave da PIN e la salva in sessione (mai su disco)
-        async function hbInitSessionKey(pin) {
-            const salt = _hbGetOrCreateSalt();
-            HB_SESSION_KEY = await deriveKey(pin, salt);
-        }
+        async function hbInitSessionKey(pin) { /* no-op */ }
 
-        function _hbGetOrCreateSalt() {
-            let saltHex = localStorage.getItem('hb_ls_salt');
-            if (!saltHex) {
-                const bytes = crypto.getRandomValues(new Uint8Array(16));
-                saltHex = Array.from(bytes).map(b => b.toString(16).padStart(2,'0')).join('');
-                localStorage.setItem('hb_ls_salt', saltHex);
-            }
-            return new Uint8Array(saltHex.match(/.{2}/g).map(b => parseInt(b,16)));
-        }
+        function _hbGetOrCreateSalt() { return new Uint8Array(16); }
 
-        // Cifra un JSON string → 'hb_enc_v11:<base64>'
-        async function _hbEncryptLocal(text) {
-            if (!HB_SESSION_KEY) return text;
-            const iv  = crypto.getRandomValues(new Uint8Array(12));
-            const enc = await crypto.subtle.encrypt(
-                { name:'AES-GCM', iv }, HB_SESSION_KEY,
-                new TextEncoder().encode(text)
-            );
-            const combined = new Uint8Array(12 + enc.byteLength);
-            combined.set(iv, 0);
-            combined.set(new Uint8Array(enc), 12);
-            // Loop invece di spread per evitare stack overflow su array grandi
-            let bin = '';
-            for (let i = 0; i < combined.length; i++) bin += String.fromCharCode(combined[i]);
-            return HB_ENC_PREFIX + btoa(bin);
-        }
+        async function _hbEncryptLocal(text) { return text; }
 
-        // Decifra 'hb_enc_v11:<base64>' → stringa originale
-        async function _hbDecryptLocal(encText) {
-            if (!HB_SESSION_KEY || !encText.startsWith(HB_ENC_PREFIX)) return encText;
-            const combined = new Uint8Array(
-                atob(encText.slice(HB_ENC_PREFIX.length)).split('').map(c => c.charCodeAt(0))
-            );
-            const dec = await crypto.subtle.decrypt(
-                { name:'AES-GCM', iv: combined.slice(0,12) },
-                HB_SESSION_KEY, combined.slice(12)
-            );
-            return new TextDecoder().decode(dec);
-        }
+        async function _hbDecryptLocal(encText) { return encText; }
 
-        // Decifra se cifrato, altrimenti parse diretto (retrocompatibilità)
         async function _hbDecryptOrParse(raw) {
             if (!raw) return null;
-            try {
-                if (raw.startsWith(HB_ENC_PREFIX)) {
-                    return JSON.parse(await _hbDecryptLocal(raw));
-                }
-                return JSON.parse(raw); // legacy plain
-            } catch(e) { return null; }
+            try { return JSON.parse(raw); } catch(e) { return null; }
         }
 
-        // Carica e decifra categories + items dopo PIN verificato
+        // Carica categories + items dal localStorage (plain JSON)
         async function hbLoadEncryptedState() {
             const catsRaw  = localStorage.getItem('hb_core_cats');
             const itemsRaw = localStorage.getItem('hb_core_items');
+            // Retrocompatibilità: se i dati erano cifrati non possiamo leggerli → reset
+            if (catsRaw && catsRaw.startsWith(HB_ENC_PREFIX)) {
+                showToast('⚠️ Dati cifrati trovati: impossibile leggerli senza cifratura. Usa Reset Emergenza.', false);
+                state.categories = INITIAL_CATEGORIES;
+                state.items = [];
+                return;
+            }
             state.categories = await _hbDecryptOrParse(catsRaw) || INITIAL_CATEGORIES;
             state.items      = await _hbDecryptOrParse(itemsRaw) || [];
-            // Migrazione: se i dati erano in chiaro, ricifrali subito
-            if ((catsRaw  && !catsRaw.startsWith(HB_ENC_PREFIX)) ||
-                (itemsRaw && !itemsRaw.startsWith(HB_ENC_PREFIX))) {
-                _hbSaveEncrypted();
-            }
         }
 
-        // Salva cifrato (fire-and-forget, non blocca l'UI)
-        async function _hbSaveEncrypted() {
-            // SICUREZZA: senza chiave sessione non tocchiamo mai il localStorage
-            // (evita sovrascrittura dati con array vuoti prima del login)
-            if (!HB_SESSION_KEY) return;
-            try {
-                const [ce, ie] = await Promise.all([
-                    _hbEncryptLocal(JSON.stringify(state.categories)),
-                    _hbEncryptLocal(JSON.stringify(state.items))
-                ]);
-                localStorage.setItem('hb_core_cats',  ce);
-                localStorage.setItem('hb_core_items', ie);
-            } catch(e) { console.error('HB Crypto save error:', e); }
-        }
+        async function _hbSaveEncrypted() { /* no-op: saveState scrive direttamente */ }
 
-        // Cancella la chiave dalla memoria (logout)
-        function hbCryptoLock() { HB_SESSION_KEY = null; }
+        function hbCryptoLock() { /* no-op */ }
 
-        // ─── Fine HB LOCAL CRYPTO ────────────────────────────────────
 
         async function checkPin() {
             renderPinDots();
@@ -4501,8 +4412,6 @@
             // ── PIN normale ─────────────────────────────────────
             if (pinBuffer === state.settings.pin) {
                 pinAttempts = 0;
-                // Deriva chiave sessione e carica dati cifrati
-                await hbInitSessionKey(pinBuffer);
                 await hbLoadEncryptedState();
                 unlockVault();
             } else {
@@ -4956,38 +4865,17 @@ th{background:#0f172a;color:white;padding:9px 12px;text-align:left;font-size:10p
         function doImportHB(ev) {
             const f = ev.target.files[0]; if(!f) return;
             const r = new FileReader();
-            r.onload = async function(e) {
+            r.onload = function(e) {
                 try {
                     const raw = JSON.parse(e.target.result);
-                    let d = raw;
-                    // Gestione backup cifrato .hbb
+                    // Retrocompatibilità: avvisa se il file era cifrato
                     if (raw.hb_backup && raw.enc) {
-                        if (!HB_SESSION_KEY) {
-                            showToast('⚠️ Sblocca il vault prima di importare un backup cifrato', false);
-                            return;
-                        }
-                        // Ri-deriva la chiave se il backup viene da un altro dispositivo (salt diverso)
-                        let decryptKey = HB_SESSION_KEY;
-                        if (raw.salt && raw.salt !== (localStorage.getItem('hb_ls_salt') || '')) {
-                            const backupSalt = new Uint8Array(
-                                raw.salt.match(/.{2}/g).map(b => parseInt(b, 16))
-                            );
-                            decryptKey = await deriveKey(state.settings.pin, backupSalt);
-                        }
-                        const HB_ENC_PFX = 'hb_enc_v11:';
-                        const combined = new Uint8Array(
-                            atob(raw.enc.slice(HB_ENC_PFX.length)).split('').map(c => c.charCodeAt(0))
-                        );
-                        const decBuf = await crypto.subtle.decrypt(
-                            { name: 'AES-GCM', iv: combined.slice(0, 12) },
-                            decryptKey,
-                            combined.slice(12)
-                        );
-                        d = JSON.parse(new TextDecoder().decode(decBuf));
+                        showToast('⚠️ File .hbb cifrato non supportato. Esporta un nuovo backup JSON.', false);
+                        return;
                     }
-                    if(!d.categories || !d.items) throw new Error('Formato non valido');
-                    applyImport(d.categories, d.items, 'HomeBull', false);
-                } catch(err) { showToast('File non valido o PIN errato: ' + err.message, false); }
+                    if(!raw.categories || !raw.items) throw new Error('Formato non valido');
+                    applyImport(raw.categories, raw.items, 'HomeBull', false);
+                } catch(err) { showToast('File non valido: ' + err.message, false); }
             };
             r.readAsText(f);
             ev.target.value = '';
