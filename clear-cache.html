@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HomeBull — Pulizia Cache</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, sans-serif; background: #020617; color: white;
+         min-height: 100dvh; display: flex; align-items: center; justify-content: center;
+         padding: 24px; }
+  .card { background: #0f172a; border: 1px solid #1e293b; border-radius: 28px;
+          padding: 32px 28px; max-width: 400px; width: 100%; text-align: center; }
+  h1 { font-size: 22px; font-weight: 900; font-style: italic; margin-bottom: 6px; color: #4f46e5; }
+  p  { font-size: 13px; color: #64748b; line-height: 1.6; margin-bottom: 20px; }
+  .btn { width: 100%; padding: 16px; border-radius: 16px; border: none; cursor: pointer;
+         font-size: 13px; font-weight: 900; text-transform: uppercase; letter-spacing: 0.1em;
+         transition: filter 0.15s; }
+  .btn-primary { background: #4f46e5; color: white; margin-bottom: 10px; }
+  .btn-primary:hover { filter: brightness(1.15); }
+  .btn-secondary { background: #1e293b; color: #64748b; }
+  #log { margin-top: 20px; background: #020617; border-radius: 12px; padding: 14px;
+         font-family: monospace; font-size: 11px; color: #4ade80; text-align: left;
+         min-height: 60px; line-height: 1.8; display: none; }
+  .step { display: flex; align-items: center; gap: 10px; padding: 10px 0;
+          border-bottom: 1px solid #1e293b; text-align: left; }
+  .step:last-child { border: none; }
+  .num { width: 28px; height: 28px; border-radius: 50%; background: #4f46e5;
+         display: flex; align-items: center; justify-content: center;
+         font-size: 12px; font-weight: 900; flex-shrink: 0; }
+  .step-text { font-size: 12px; color: #94a3b8; font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>HomeBull Pro</h1>
+  <p style="color:#4f46e5;font-weight:800;font-size:12px;text-transform:uppercase;letter-spacing:0.12em;margin-bottom:16px;">Pulizia Cache — Aggiornamento v6.0.1</p>
+
+  <div style="margin-bottom:24px;">
+    <div class="step">
+      <div class="num">1</div>
+      <div class="step-text">Disregistra il Service Worker vecchio</div>
+    </div>
+    <div class="step">
+      <div class="num">2</div>
+      <div class="step-text">Cancella tutte le cache del browser</div>
+    </div>
+    <div class="step">
+      <div class="num">3</div>
+      <div class="step-text">Riapre HomeBull con la versione fresca</div>
+    </div>
+  </div>
+
+  <button class="btn btn-primary" onclick="doClear()">🧹 Pulisci e Aggiorna Ora</button>
+  <button class="btn btn-secondary" onclick="window.location.href='index.html'">Vai direttamente all'app</button>
+
+  <div id="log"></div>
+</div>
+
+<script>
+async function doClear() {
+  const log = document.getElementById('log');
+  log.style.display = 'block';
+  log.innerHTML = '';
+
+  function write(msg) {
+    log.innerHTML += '→ ' + msg + '\n';
+  }
+
+  write('Avvio pulizia...');
+
+  // 1. Disregistra tutti i Service Workers
+  if ('serviceWorker' in navigator) {
+    try {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      for (const reg of regs) {
+        await reg.unregister();
+        write('SW disregistrato: ' + reg.scope);
+      }
+      if (regs.length === 0) write('Nessun SW trovato');
+    } catch(e) {
+      write('Errore SW: ' + e.message);
+    }
+  } else {
+    write('Service Worker non supportato');
+  }
+
+  // 2. Cancella tutte le cache
+  if ('caches' in window) {
+    try {
+      const keys = await caches.keys();
+      for (const k of keys) {
+        await caches.delete(k);
+        write('Cache eliminata: ' + k);
+      }
+      if (keys.length === 0) write('Nessuna cache trovata');
+    } catch(e) {
+      write('Errore cache: ' + e.message);
+    }
+  }
+
+  write('✅ Pulizia completata!');
+  write('Reindirizzo a HomeBull v6.0.1...');
+
+  // 3. Redirect con cache-bust
+  setTimeout(() => {
+    window.location.href = 'index.html?v=6.0.1&t=' + Date.now();
+  }, 1500);
+}
+</script>
+</body>
+</html>
