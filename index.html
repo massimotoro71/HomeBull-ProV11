@@ -3874,7 +3874,7 @@
         async function exportJSON() {
             const notes = typeof hbNotesLoad === 'function' ? hbNotesLoad() : [];
             const payload = {
-                version: '11.1.20',
+                version: '11.1.22',
                 exportedAt: new Date().toISOString(),
                 encrypted: true,
                 categories: state.categories,
@@ -3887,7 +3887,8 @@
             let filename = `homebull-backup-${new Date().toISOString().slice(0,10)}.json`;
             if (HB_SESSION_KEY) {
                 const encJson = await _hbEncryptLocal(json);
-                content = JSON.stringify({ hb_backup: true, v: '11', enc: encJson });
+                const saltHex = localStorage.getItem('hb_ls_salt') || '';
+                content = JSON.stringify({ hb_backup: true, v: '11', enc: encJson, salt: saltHex });
                 filename = `homebull-backup-${new Date().toISOString().slice(0,10)}.hbb`;
             }
             const blob = new Blob([content], { type: 'application/json' });
@@ -3933,8 +3934,24 @@
                             showToast('⚠️ Sblocca il vault prima di importare un backup cifrato', false);
                             return;
                         }
-                        const decrypted = await _hbDecryptLocal(raw.enc);
-                        data = JSON.parse(decrypted);
+                        // Se il backup ha il suo salt (dispositivo diverso), ri-deriva la chiave
+                        let decryptKey = HB_SESSION_KEY;
+                        if (raw.salt && raw.salt !== (localStorage.getItem('hb_ls_salt') || '')) {
+                            const backupSalt = new Uint8Array(
+                                raw.salt.match(/.{2}/g).map(b => parseInt(b, 16))
+                            );
+                            decryptKey = await deriveKey(state.settings.pin, backupSalt);
+                        }
+                        const HB_ENC_PFX = 'hb_enc_v11:';
+                        const combined = new Uint8Array(
+                            atob(raw.enc.slice(HB_ENC_PFX.length)).split('').map(c => c.charCodeAt(0))
+                        );
+                        const decBuf = await crypto.subtle.decrypt(
+                            { name: 'AES-GCM', iv: combined.slice(0, 12) },
+                            decryptKey,
+                            combined.slice(12)
+                        );
+                        data = JSON.parse(new TextDecoder().decode(decBuf));
                     }
                     if (!data.categories || !data.items) throw new Error('Formato non valido');
                     const msg = `Importare ${data.items.length} password e ${data.categories.length} categorie?\n\nI dati attuali verranno sostituiti.`;
@@ -4939,12 +4956,38 @@ th{background:#0f172a;color:white;padding:9px 12px;text-align:left;font-size:10p
         function doImportHB(ev) {
             const f = ev.target.files[0]; if(!f) return;
             const r = new FileReader();
-            r.onload = function(e) {
+            r.onload = async function(e) {
                 try {
-                    const d = JSON.parse(e.target.result);
+                    const raw = JSON.parse(e.target.result);
+                    let d = raw;
+                    // Gestione backup cifrato .hbb
+                    if (raw.hb_backup && raw.enc) {
+                        if (!HB_SESSION_KEY) {
+                            showToast('⚠️ Sblocca il vault prima di importare un backup cifrato', false);
+                            return;
+                        }
+                        // Ri-deriva la chiave se il backup viene da un altro dispositivo (salt diverso)
+                        let decryptKey = HB_SESSION_KEY;
+                        if (raw.salt && raw.salt !== (localStorage.getItem('hb_ls_salt') || '')) {
+                            const backupSalt = new Uint8Array(
+                                raw.salt.match(/.{2}/g).map(b => parseInt(b, 16))
+                            );
+                            decryptKey = await deriveKey(state.settings.pin, backupSalt);
+                        }
+                        const HB_ENC_PFX = 'hb_enc_v11:';
+                        const combined = new Uint8Array(
+                            atob(raw.enc.slice(HB_ENC_PFX.length)).split('').map(c => c.charCodeAt(0))
+                        );
+                        const decBuf = await crypto.subtle.decrypt(
+                            { name: 'AES-GCM', iv: combined.slice(0, 12) },
+                            decryptKey,
+                            combined.slice(12)
+                        );
+                        d = JSON.parse(new TextDecoder().decode(decBuf));
+                    }
                     if(!d.categories || !d.items) throw new Error('Formato non valido');
                     applyImport(d.categories, d.items, 'HomeBull', false);
-                } catch(err) { showToast('File non valido: ' + err.message, false); }
+                } catch(err) { showToast('File non valido o PIN errato: ' + err.message, false); }
             };
             r.readAsText(f);
             ev.target.value = '';
@@ -7053,6 +7096,7 @@ th{background:#0f172a;color:white;padding:9px 12px;text-align:left;font-size:10p
         // ══════════════════════════════════════════════════════════
         const GD_CLIENT_ID   = ''; // da configurare nelle impostazioni
         const GD_SCOPE       = 'https://www.googleapis.com/auth/drive.file';
+        // OAuth redirect fix for GitHub Pages
         const GD_FOLDER_NAME = 'Homebull';
         const GD_BACKUP_KEY  = 'hb_gdrive_token';
         const GD_LAST_KEY    = 'hb_gdrive_last_backup';
@@ -7093,7 +7137,7 @@ th{background:#0f172a;color:white;padding:9px 12px;text-align:left;font-size:10p
             if (!clientId) { showToast('Inserisci il Client ID Google nelle impostazioni', false); return; }
             const params = new URLSearchParams({
                 client_id:     clientId,
-                redirect_uri:  window.location.origin + window.location.pathname,
+                redirect_uri:  'https://massimotoro71.github.io/HomeBull-ProV11/index.html',
                 response_type: 'token',
                 scope:         GD_SCOPE,
                 include_granted_scopes: 'true',
